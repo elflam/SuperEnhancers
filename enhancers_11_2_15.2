@@ -182,6 +182,10 @@ for (i in 1:nrow(enhancer)){
 #create table with genes, distance to enhancer, TU vs TM p-values
   positions2 <- unique(extendedOverlap$pos[extendedOverlap$closest.TSS %in% row.names(TUTM)])
   distance <- sapply(positions2, function(x) x-enhancer[i,]$start)
+  DE <- row.names(TUTM)
+  names(DE) <- row.names(TUTM)
+  DE[] <- c("no")
+  DE[DEgenes] <- "yes"
   geneTable <- data.frame(genes = row.names(TUTM), position = positions2, distance=distance,
                          p.value = TUTM.fit$p.value[,2])
   geneTable <- geneTable[order(geneTable$p.value),]
