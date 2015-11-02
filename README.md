@@ -1,2 +1,2 @@
 # SuperEnhancer 
-written by Emilys
+written by Emily
