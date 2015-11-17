@@ -443,7 +443,7 @@ for (i in 1:nrow(sortedEnhancer)){
                           LFC=round(TUTM.fit$coefficients[,2],2),
                           p.value = signif(TUTM.fit$p.value[,2],2), 
                           adj.p.value =signif(p.adjust(TUTM.fit$p.value[,2],
-                                                       method='BH'),2), DE = DE)
+                                                       method='BH'),4), DE = DE)
   geneTable <- geneTable[order(geneTable$p.value),]
   textplot(geneTable)
 }
