@@ -1,0 +1,464 @@
+setwd("~/Desktop/Super-Enhancers")
+
+#import enhancer list and noodle docs, label columns of noodle docs
+enhancer<- read.csv("enhancerlist.csv")
+for (i in 1:nrow(enhancer)){
+  rownames(enhancer)[i] <- paste(as.character(enhancer[i,]$chr), ":", enhancer[i,]$start, "-", enhancer[i,]$end, sep="")
+}
+
+for (i in 1:22) {
+  assign(paste('chr',i,sep=""),
+         read.table(paste("Noodles/noodles.chr",i,'.txt',sep=""), quote="", na.strings="", comment.char="",
+                    stringsAsFactors=F, header=F, sep="\t", row.names=1))
+}
+
+noodleLabels <- read.table("noodleLabels.csv", header = F,sep=",",
+                           quote="", na.strings="", comment.char="", stringsAsFactors=F,
+                           nrows=1,row.names=1)
+
+#import clinical data and RNA expression (log)
+RNAExp <- read.table("HPVOPRSEMData_091615_log.csv", header = T, sep=",", quote="",
+                     na.strings="", comment.char="", stringsAsFactors=F)
+clinical <- read.table("clinicaldata.csv", header = T,
+                       sep=",", quote="", na.strings="", comment.char="", stringsAsFactors=F)
+
+
+#import bedfiles for H3k27ac coverage 
+library(rtracklayer)
+
+extraCols_broadPeak <- c(signalValue = "numeric", pValue = "numeric",
+                         qValue = "numeric")
+
+H2171 <-import('A549',format = 'BED', extraCols = extraCols_broadPeak)
+HeLa <-import('HeLa-S3',format = 'BED', extraCols = extraCols_broadPeak)
+IMR90 <- import('NHEK',format = 'BED', extraCols = extraCols_broadPeak)
+NHLF <- import('Nhlf',format = 'BED', extraCols = extraCols_broadPeak)
+
+#required packages
+library("edgeR")
+library(limma)
+library('ClassDiscovery')
+library('simpleaffy')
+library(gplots)
+
+#create vector to order output
+orderOutput <- vector('numeric')
+j=1
+
+#begin loop #1
+for (i in 1:nrow(enhancer)){
+  k <- i
+  
+  #filter out enhancers where ratio.tmr >= ratio.normal 
+  if (enhancer[i,]$tmr.ratio > enhancer[i,]$nor.ratio){
+    next
+  }
+  
+  #filter out chrX
+  if (as.character(enhancer[i,]$chr) == "chrX"){
+    next
+  }
+  
+  #find noodles overlapping with enhancer
+  CHR<-get(as.character(enhancer[i,]$chr))
+  colnames(CHR) <- noodleLabels
+  noodleOverlap <- CHR[which(CHR$end >= enhancer[i,]$start & CHR$start <= enhancer[i,]$end), ]   
+  
+  ##H3k27Ac filter
+  #select correct cell line
+  line <- get(as.character(enhancer[i,]$type))
+  
+  #turn noodle overlap to gr object 
+  grOverlap <- GRanges(seqnames =
+                         Rle(c(noodleOverlap$chr)),
+                       ranges =
+                         IRanges(noodleOverlap$start, noodleOverlap$end),
+                       strand = 
+                         Rle(strand(c(noodleOverlap$dir))))
+  
+  #find overlap between noodle overlap and H3k27Ac coverage 
+  if (length(findOverlaps(grOverlap, line)) == 0) {
+    next
+  }
+  
+  #find indices of hotspot (max nor.ratio) and determine which samples have 5 or fewer reads
+  hotspot <- which((noodleOverlap$nor.ratio - noodleOverlap$tmr.ratio) == max(noodleOverlap$nor.ratio - noodleOverlap$tmr.ratio))
+  hotspotSamp <- names(which(apply(noodleOverlap[hotspot,grep('700.reads',noodleLabels)] <= 5,2,all)))
+  if (length(hotspotSamp) < 10){
+    next
+  }  
+  DNAsamp <- names(which(apply(noodleOverlap[hotspot,sub('.700.reads','',hotspotSamp)] == 0,2,all)))
+  
+  #match DNA sample #s to RNA sample #
+  RNAsamp <- clinical[which(clinical$Tumor.Tissue.DNA.HAND.ID %in% DNAsamp), ]
+  RNAsamp <- RNAsamp$Tumor.Tissue.RNA.HAND.ID
+  
+  #Expand enhancers by 1Mbp on each side
+  expStart <- enhancer[i,]$end - 1000000
+  expEnd <- enhancer[i,]$start + 1000000
+  
+  #find noodles overlapping extended enhancer & get list of closest genes
+  extendedOverlap <- CHR[which(CHR$end >= expStart & CHR$start <= expEnd), ]
+  geneList <- unique(extendedOverlap$closest.TSS)
+  positions <- unique(extendedOverlap$pos)
+  
+  #get expression data for closest genes from RNAExp file
+  #Genes that are not listed in RNAExp are filtered out
+  geneExp <- RNAExp[0,]
+  geneNames <- sapply(strsplit(RNAExp$genes, split="\\|"), function(x){x[[1]]})
+  rownames(RNAExp) <- geneNames
+  RNAExp2 <- RNAExp[,-1]
+  screenedGenes <- intersect(geneList, geneNames)
+  geneExp <- RNAExp2[screenedGenes, ]
+  
+  #separate normal and tumor samples (gene expression data)
+  Nsamp <- geneExp[ ,grep('N',colnames(geneExp))]
+  Tsamp <- geneExp[ ,grep('T',colnames(geneExp))]
+  Xsamp <- geneExp[ ,grep('X', colnames(geneExp))]
+  Csamp <- geneExp[ ,grep('C',colnames(geneExp))]
+  
+  #change colnames to only display sample HandID
+  colnames(Nsamp) <- c(sapply(strsplit(colnames(Nsamp), split="\\."), function(x){x[[2]]}))
+  colnames(Tsamp) <- c(sapply(strsplit(colnames(Tsamp), split="\\."), function(x){x[[2]]}))
+  colnames(Xsamp) <- c(sapply(strsplit(colnames(Xsamp), split="\\."), function(x){x[[2]]}))
+  colnames(Csamp) <- c(sapply(strsplit(colnames(Csamp), split="\\."), function(x){x[[2]]}))
+  
+  #separate U & M samples, ensure that all are matrices 
+  NUsamp <- as.matrix(Nsamp[ ,which(colnames(Nsamp) %in% RNAsamp)])
+  rownames(NUsamp) <- rownames(Nsamp)
+  colnames(NUsamp) <- colnames(Nsamp[colnames(Nsamp) %in% RNAsamp])
+  
+  NMsamp <- as.matrix(Nsamp[ ,which(!(colnames(Nsamp) %in% RNAsamp))])
+  rownames(NMsamp) <- rownames(Nsamp)
+  colnames(NMsamp) <- colnames(Nsamp[!(colnames(Nsamp) %in% RNAsamp)])
+  
+  TUsamp <- as.matrix(Tsamp[ ,which(colnames(Tsamp) %in% RNAsamp)])
+  rownames(TUsamp) <- rownames(Tsamp)
+  colnames(TUsamp) <- colnames(Tsamp[colnames(Tsamp) %in% RNAsamp])
+  
+  TMsamp <- as.matrix(Tsamp[ ,which(!(colnames(Tsamp) %in% RNAsamp))])
+  rownames(TMsamp) <- rownames(Tsamp)
+  colnames(TMsamp) <- colnames(Tsamp[!(colnames(Tsamp) %in% RNAsamp)])
+  
+  XUsamp <- as.matrix(Xsamp[ ,which(colnames(Xsamp) %in% RNAsamp)])
+  rownames(XUsamp) <- rownames(Xsamp)
+  colnames(XUsamp) <- colnames(Xsamp[colnames(Xsamp) %in% RNAsamp])
+  
+  XMsamp <- as.matrix(Xsamp[ ,(which(!(colnames(Xsamp) %in% RNAsamp)))])
+  rownames(XMsamp) <- rownames(Xsamp)
+  colnames(XMsamp) <- colnames(Xsamp[!(colnames(Xsamp) %in% RNAsamp)])
+  
+  CUsamp <- as.matrix(Csamp[ ,which(colnames(Csamp) %in% RNAsamp)])
+  rownames(CUsamp) <- rownames(Csamp)
+  colnames(CUsamp) <- colnames(Csamp[colnames(Csamp) %in% RNAsamp])
+  
+  CMsamp <- as.matrix(Csamp[ ,(which(!(colnames(Csamp) %in% RNAsamp)))])
+  rownames(CMsamp) <- rownames(Csamp)
+  colnames(CMsamp) <- colnames(Csamp[!(colnames(Csamp) %in% RNAsamp)])
+  
+  #create vector of samples with class type
+  classVec <- c(colnames(NUsamp), colnames(NMsamp), colnames(TUsamp), colnames(TMsamp), colnames(XUsamp),
+                colnames(XMsamp), colnames(CUsamp), colnames(CMsamp))
+  names(classVec) <- classVec
+  classVec[colnames(NUsamp)] <- "NU"
+  classVec[colnames(NMsamp)] <- "NM"
+  classVec[colnames(TUsamp)] <- "TU"
+  classVec[colnames(TMsamp)] <- "TM"
+  classVec[colnames(XUsamp)] <- "XU"
+  classVec[colnames(XMsamp)] <- "XM"
+  classVec[colnames(CUsamp)] <- "CU"
+  classVec[colnames(CMsamp)] <- "CM"
+  
+  ##Differential methylation between TU and TM samples
+  TUTM <- merge(TUsamp, TMsamp, by="row.names", sort=F)
+  rownames(TUTM) <- TUTM$Row.names
+  TUTM$Row.names <- NULL
+  colnames(TUTM)[colnames(TUTM)%in%colnames(TUsamp)] <- paste("U", colnames(TUTM[ ,colnames(TUsamp)]), sep = "_")
+  colnames(TUTM)[colnames(TUTM)%in%colnames(TMsamp)] <- paste("M", colnames(TUTM[ ,colnames(TMsamp)]), sep = "_")
+  TUTM <- as.matrix(TUTM)
+  
+  TUTM <- TUTM[apply(log2(TUTM+1),1,max) - apply(log2(TUTM+1),1,min)>0.5,]
+  
+  #filter distances > 1Mbp
+  positions2 <- unique(extendedOverlap$pos[extendedOverlap$closest.TSS %in% row.names(TUTM)])
+  names(positions2) <- row.names(TUTM)
+  distance <- sapply(positions2, function(x) x-enhancer[i,]$start)
+  names(distance) <- row.names(TUTM)
+  for (i in names(distance)){
+    if (distance[i] < -1000000){
+      TUTM <- TUTM[-(which(rownames(TUTM) == i)),] 
+      positions2 <- positions2[-(which(names(positions2)==i))]
+      distance <- distance[-(which(names(distance)==i))]
+    }
+    else if (distance[i] > 1000000){
+      TUTM <- TUTM[-(which(rownames(TUTM) == i)),]
+      positions2 <- positions2[-(which(names(positions2)==i))]
+      distance <- distance[-(which(names(distance)==i))]
+    }
+  }
+  
+  if (nrow(TUTM) == 0){
+    next
+  }
+  
+  #continue differential methylation
+  pheno <- factor(substr(colnames(TUTM),1,1),levels=c('U','M'))
+  names(pheno) <- colnames(TUTM)
+  mm <- model.matrix(~pheno)
+  
+  TUTM_DGE <- DGEList(counts=TUTM) # move outside of loop and precompute (still filter to overall logFC and max expression >0)
+  TUTM_DGE <- calcNormFactors(TUTM_DGE) # move outside of loop
+  TUTM_VOOM <- voom(TUTM_DGE, mm) # stays in loop FOR ALL GENES left after filtering
+  TUTM.fit <- eBayes(lmFit(TUTM_VOOM,mm)) # keep as is
+  
+  DEgenes <- row.names(topTable(TUTM.fit,coef="phenoM",p.value = 0.05, number=Inf,lfc=1))
+  # DEgenes <- row.names(topTable(TUTM.fit[screenedGenes,],coef="phenoM",p.value = 0.05, number=Inf,lfc=1))
+  
+  #create matrix for heatmap
+  expmat <- function(x, y){
+    df <- merge(x, y, by= "row.names", all.x= F, all.y= F, sort=F)
+    rownames(df) <- df$Row.names
+    df$Row.names <- NULL
+    return(df)
+  }
+  expMatrix <- Reduce(expmat, list(NUsamp, NMsamp, TUsamp, TMsamp, XUsamp, XMsamp, CUsamp, CMsamp))
+  expMatrix <- as.matrix(expMatrix[row.names(expMatrix)%in%row.names(TUTM),])
+  
+  #sort matrix by p-value
+  pvals <- TUTM.fit$p.value[,2]
+  sortedExpMatrix <- expMatrix[names(sort(pvals)),]
+
+  #create table with genes, distance to enhancer, TU vs TM p-values
+  DE <- row.names(TUTM)
+  names(DE) <- row.names(TUTM)
+  DE[] <- c("no")
+  DE[DEgenes] <- "yes"
+  geneTable <- data.frame(position = positions2, distance=distance,
+                          LFC=round(TUTM.fit$coefficients[,2],2),
+                          p.value = signif(TUTM.fit$p.value[,2],2), 
+                          adj.p.value =signif(p.adjust(TUTM.fit$p.value[,2],
+                                                       method='BH'),2), DE = DE)
+  geneTable <- geneTable[order(geneTable$p.value),]
+  
+  #add lowest p-value to output vector
+  orderOutput[j] <- geneTable[1,5]
+  names(orderOutput)[j] <- rownames(enhancer)[k]
+  j=j+1
+  
+}
+
+#order output vector
+orderOutput <- orderOutput[order(orderOutput)]
+sortedEnhancer <- enhancer[names(orderOutput),]
+
+##second loop to print figures
+pdf("enhancer.pdf")
+for (i in 1:nrow(sortedEnhancer)){
+
+  #create label for pdf 
+  label <- paste(as.character(sortedEnhancer[i,]$chr), ":", sortedEnhancer[i,]$start, "-", sortedEnhancer[i,]$end)
+  textplot(label)
+  
+  #find noodles overlapping with enhancer
+  CHR<-get(as.character(sortedEnhancer[i,]$chr))
+  colnames(CHR) <- noodleLabels
+  noodleOverlap <- CHR[which(CHR$end >= sortedEnhancer[i,]$start & CHR$start <= sortedEnhancer[i,]$end), ] 
+  
+  #find indices of hotspot (max nor.ratio) and determine which samples have 5 or fewer reads
+  hotspot <- which((noodleOverlap$nor.ratio - noodleOverlap$tmr.ratio) == max(noodleOverlap$nor.ratio - noodleOverlap$tmr.ratio))
+  hotspotSamp <- names(which(apply(noodleOverlap[hotspot,grep('700.reads',noodleLabels)] <= 5,2,all)))
+  if (length(hotspotSamp) < 10){
+    next
+  }  
+  DNAsamp <- names(which(apply(noodleOverlap[hotspot,sub('.700.reads','',hotspotSamp)] == 0,2,all)))
+  
+  #create plot with both normal & tumor meth ratios (hotspot)
+  Coordinate <- cbind(noodleOverlap$start, noodleOverlap$start)
+  Methylation <- cbind(noodleOverlap$nor.ratio, noodleOverlap$tmr.ratio)
+  par(mar=c(5.1, 4.1, 4.1, 8.1), xpd = TRUE)
+  matplot(Coordinate,Methylation, type="l", ylim=c(0,1))
+  points(c(noodleOverlap[hotspot, ]$start), rep(1, length(hotspot)), col = "blue", pch = 8)
+  legend('topright', inset=c(-0.25,0), pch='-',col=c('red','black'),legend=c('T','N'))
+  
+  #match DNA sample #s to RNA sample #
+  RNAsamp <- clinical[which(clinical$Tumor.Tissue.DNA.HAND.ID %in% DNAsamp), ]
+  RNAsamp <- RNAsamp$Tumor.Tissue.RNA.HAND.ID
+  
+  #Expand enhancers by 1Mbp on each side
+  expStart <- sortedEnhancer[i,]$end - 1000000
+  expEnd <- sortedEnhancer[i,]$start + 1000000
+  
+  #find noodles overlapping extended enhancer & get list of closest genes
+  extendedOverlap <- CHR[which(CHR$end >= expStart & CHR$start <= expEnd), ]
+  geneList <- unique(extendedOverlap$closest.TSS)
+  positions <- unique(extendedOverlap$pos)
+  
+  #get expression data for closest genes from RNAExp file
+  #Genes that are not listed in RNAExp are filtered out
+  geneExp <- RNAExp[0,]
+  geneNames <- sapply(strsplit(RNAExp$genes, split="\\|"), function(x){x[[1]]})
+  rownames(RNAExp) <- geneNames
+  RNAExp2 <- RNAExp[,-1]
+  screenedGenes <- intersect(geneList, geneNames)
+  geneExp <- RNAExp2[screenedGenes, ]
+  #separate normal and tumor samples (gene expression data)
+  Nsamp <- geneExp[ ,grep('N',colnames(geneExp))]
+  Tsamp <- geneExp[ ,grep('T',colnames(geneExp))]
+  Xsamp <- geneExp[ ,grep('X', colnames(geneExp))]
+  Csamp <- geneExp[ ,grep('C',colnames(geneExp))]
+  
+  #change colnames to only display sample HandID
+  colnames(Nsamp) <- c(sapply(strsplit(colnames(Nsamp), split="\\."), function(x){x[[2]]}))
+  colnames(Tsamp) <- c(sapply(strsplit(colnames(Tsamp), split="\\."), function(x){x[[2]]}))
+  colnames(Xsamp) <- c(sapply(strsplit(colnames(Xsamp), split="\\."), function(x){x[[2]]}))
+  colnames(Csamp) <- c(sapply(strsplit(colnames(Csamp), split="\\."), function(x){x[[2]]}))
+  
+  #separate U & M samples, ensure that all are matrices 
+  NUsamp <- as.matrix(Nsamp[ ,which(colnames(Nsamp) %in% RNAsamp)])
+  rownames(NUsamp) <- rownames(Nsamp)
+  colnames(NUsamp) <- colnames(Nsamp[colnames(Nsamp) %in% RNAsamp])
+  
+  NMsamp <- as.matrix(Nsamp[ ,which(!(colnames(Nsamp) %in% RNAsamp))])
+  rownames(NMsamp) <- rownames(Nsamp)
+  colnames(NMsamp) <- colnames(Nsamp[!(colnames(Nsamp) %in% RNAsamp)])
+  
+  TUsamp <- as.matrix(Tsamp[ ,which(colnames(Tsamp) %in% RNAsamp)])
+  rownames(TUsamp) <- rownames(Tsamp)
+  colnames(TUsamp) <- colnames(Tsamp[colnames(Tsamp) %in% RNAsamp])
+  
+  TMsamp <- as.matrix(Tsamp[ ,which(!(colnames(Tsamp) %in% RNAsamp))])
+  rownames(TMsamp) <- rownames(Tsamp)
+  colnames(TMsamp) <- colnames(Tsamp[!(colnames(Tsamp) %in% RNAsamp)])
+  
+  XUsamp <- as.matrix(Xsamp[ ,which(colnames(Xsamp) %in% RNAsamp)])
+  rownames(XUsamp) <- rownames(Xsamp)
+  colnames(XUsamp) <- colnames(Xsamp[colnames(Xsamp) %in% RNAsamp])
+  
+  XMsamp <- as.matrix(Xsamp[ ,(which(!(colnames(Xsamp) %in% RNAsamp)))])
+  rownames(XMsamp) <- rownames(Xsamp)
+  colnames(XMsamp) <- colnames(Xsamp[!(colnames(Xsamp) %in% RNAsamp)])
+  
+  CUsamp <- as.matrix(Csamp[ ,which(colnames(Csamp) %in% RNAsamp)])
+  rownames(CUsamp) <- rownames(Csamp)
+  colnames(CUsamp) <- colnames(Csamp[colnames(Csamp) %in% RNAsamp])
+  
+  CMsamp <- as.matrix(Csamp[ ,(which(!(colnames(Csamp) %in% RNAsamp)))])
+  rownames(CMsamp) <- rownames(Csamp)
+  colnames(CMsamp) <- colnames(Csamp[!(colnames(Csamp) %in% RNAsamp)])
+  
+  #create vector of samples with class type
+  classVec <- c(colnames(NUsamp), colnames(NMsamp), colnames(TUsamp), colnames(TMsamp), colnames(XUsamp),
+                colnames(XMsamp), colnames(CUsamp), colnames(CMsamp))
+  names(classVec) <- classVec
+  classVec[colnames(NUsamp)] <- "NU"
+  classVec[colnames(NMsamp)] <- "NM"
+  classVec[colnames(TUsamp)] <- "TU"
+  classVec[colnames(TMsamp)] <- "TM"
+  classVec[colnames(XUsamp)] <- "XU"
+  classVec[colnames(XMsamp)] <- "XM"
+  classVec[colnames(CUsamp)] <- "CU"
+  classVec[colnames(CMsamp)] <- "CM"
+  
+  
+  #Create color vector for classVec
+  classCols <- classVec
+  classCols[colnames(NUsamp)] <- "blue"
+  classCols[colnames(NMsamp)] <- "cyan"
+  classCols[colnames(TUsamp)] <- "darkorchid"
+  classCols[colnames(TMsamp)] <- "darkolivegreen1"
+  classCols[colnames(XUsamp)] <- "aquamarine"
+  classCols[colnames(XMsamp)] <- "coral"
+  classCols[colnames(CUsamp)] <- "blanchedalmond"
+  classCols[colnames(CMsamp)] <- "cornflowerblue"
+  
+  classVec <- factor(classVec, levels=c('NU','NM','TU','TM','XU','XM','CU','CM'))
+  
+  ##Differential methylation between TU and TM samples
+  TUTM <- merge(TUsamp, TMsamp, by="row.names", sort=F)
+  rownames(TUTM) <- TUTM$Row.names
+  TUTM$Row.names <- NULL
+  colnames(TUTM)[colnames(TUTM)%in%colnames(TUsamp)] <- paste("U", colnames(TUTM[ ,colnames(TUsamp)]), sep = "_")
+  colnames(TUTM)[colnames(TUTM)%in%colnames(TMsamp)] <- paste("M", colnames(TUTM[ ,colnames(TMsamp)]), sep = "_")
+  TUTM <- as.matrix(TUTM)
+  
+  TUTM <- TUTM[apply(log2(TUTM+1),1,max) - apply(log2(TUTM+1),1,min)>0.5,]
+  
+  #filter distances > 1Mbp
+  positions2 <- unique(extendedOverlap$pos[extendedOverlap$closest.TSS %in% row.names(TUTM)])
+  names(positions2) <- row.names(TUTM)
+  distance <- sapply(positions2, function(x) x-sortedEnhancer[i,]$start)
+  names(distance) <- row.names(TUTM)
+  for (i in names(distance)){
+    if (distance[i] < -1000000){
+      TUTM <- TUTM[-(which(rownames(TUTM) == i)),] 
+      positions2 <- positions2[-(which(names(positions2)==i))]
+      distance <- distance[-(which(names(distance)==i))]
+    }
+    else if (distance[i] > 1000000){
+      TUTM <- TUTM[-(which(rownames(TUTM) == i)),]
+      positions2 <- positions2[-(which(names(positions2)==i))]
+      distance <- distance[-(which(names(distance)==i))]
+    }
+  }
+  
+  #continue differential methylation
+  pheno <- factor(substr(colnames(TUTM),1,1),levels=c('U','M'))
+  names(pheno) <- colnames(TUTM)
+  mm <- model.matrix(~pheno)
+  
+  TUTM_DGE <- DGEList(counts=TUTM)
+  TUTM_DGE <- calcNormFactors(TUTM_DGE)
+  TUTM_VOOM <- voom(TUTM_DGE, mm)
+  TUTM.fit <- eBayes(lmFit(TUTM_VOOM,mm))
+  
+  DEgenes <- row.names(topTable(TUTM.fit,coef="phenoM",p.value = 0.05, number=Inf,lfc=1))
+  
+  #create matrix for heatmap
+  expmat <- function(x, y){
+    df <- merge(x, y, by= "row.names", all.x= F, all.y= F, sort=F)
+    rownames(df) <- df$Row.names
+    df$Row.names <- NULL
+    return(df)
+  }
+  expMatrix <- Reduce(expmat, list(NUsamp, NMsamp, TUsamp, TMsamp, XUsamp, XMsamp, CUsamp, CMsamp))
+  expMatrix <- as.matrix(expMatrix[row.names(expMatrix)%in%row.names(TUTM),])
+  
+  #sort matrix by p-value
+  pvals <- signif(p.adjust(TUTM.fit$p.value[,2], method='BH'),2)
+  #pvals <- TUTM.fit$p.value[,2]
+  sortedExpMatrix <- expMatrix[names(sort(pvals)),]
+  
+  #create heatmap
+  heatmap.2(sortedExpMatrix, Colv=F, Rowv=F, trace="none", scale='row',
+            col=redgreen, ColSideColors = classCols,
+            hclust=function(x) hclust(x,method="complete"),
+            distfun=function(x) as.dist((1-cor(t(x)))/2))
+  
+  #create waterfall plots
+  for (i in 1){
+    samples <- names(classVec)[order(classVec, sortedExpMatrix[i,])]
+    x = as.numeric(sortedExpMatrix[i, samples])
+    names(x) <- samples
+    par(mar=c(5.1, 4.1, 4.1, 8.1), xpd = TRUE)
+    barplot(x, las=2, col = classCols[samples])
+    legend(x="topright", inset=c(-0.25,0), legend = unique(classVec[order(classVec)]),
+           fill = unique(classCols[samples]), title = rownames(sortedExpMatrix)[i])
+  }
+  
+  #create table with genes, distance to enhancer, TU vs TM p-values
+  DE <- row.names(TUTM)
+  names(DE) <- row.names(TUTM)
+  DE[] <- c("no")
+  DE[DEgenes] <- "yes"
+  geneTable <- data.frame(position = positions2, distance=distance,
+                          LFC=round(TUTM.fit$coefficients[,2],2),
+                          p.value = signif(TUTM.fit$p.value[,2],2), 
+                          adj.p.value =signif(p.adjust(TUTM.fit$p.value[,2],
+                                                       method='BH'),4), DE = DE)
+  geneTable <- geneTable[order(geneTable$p.value),]
+  textplot(geneTable)
+}
+
+dev.off()
+
+
