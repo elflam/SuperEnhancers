@@ -1,0 +1,67 @@
+
+#required packages
+library("edgeR")
+library(limma)
+library('ClassDiscovery')
+library('simpleaffy')
+
+### code
+setwd("~/Desktop/Super-Enhancers/Code Skeleton")
+load("DefineSamples.Rda")
+
+classVec <- factor(classVec, levels=c('NU','NM','TU','TM','XU','XM','CU','CM'))
+
+#import clinical data and RNA expression (log)
+#prepare RNAExp for analysis  
+RNAExp <- read.table("Enhancer Data/HPVOPRSEMData_091615_log.csv", header = T, sep=",", quote="",
+                     na.strings="", comment.char="", stringsAsFactors=F)
+geneNames <- sapply(strsplit(RNAExp$genes, split="\\|"), function(x){x[[1]]})
+rownames(RNAExp) <- geneNames
+RNAExp2 <- RNAExp[,-1]
+
+j <- 1
+SortedMatrixList <- list()
+fitList <- list()
+DEgenesList <- list()
+  
+#Create DGElist with all genes
+DEMatrix_DGE <- DGEList(counts=RNAExp2[ ,grep("T|N",colnames(RNAExp2))]) # move outside of loop and precompute (still filter to overall logFC and max expression >0)
+DEMatrix_DGE <- calcNormFactors(DEMatrix_DGE) # move outside of loop
+
+
+for (i in 1:length(matrixList)){
+
+  #continue differential methylation
+  pheno <- factor(classVec[colnames(matrixList[[i]])])
+  mm <- model.matrix(~pheno)
+  colnames(mm) <- levels(pheno)
+
+  DEMatrix_VOOM <- voom(DEMatrix_DGE, mm)
+  fit <- lmFit(DEMatrix_VOOM,mm)
+  DEMatrix.fit <- eBayes(fit) 
+
+  contrast.matrix = makeContrasts(contrasts=c("NM - TU", "TM - TU", "(NM + NU) - TU"), levels=pheno) ### add all comparisons 
+  fit2= contrasts.fit(DEMatrix.fit, contrast.matrix) 
+  fit2= eBayes(fit2) 
+
+  DEgenes <- row.names(topTable(fit2[rownames(matrixList[[i]]),],p.value = 0.05, number=Inf,lfc=1))
+  
+  fitList[j] <- fit2
+  DEgenesList[j] <- DEgenes
+
+  #sort matrices by p-value
+  pvals <- signif(p.adjust(fit2[rownames(matrixList[[i]]),]$p.value[,2], method='BH'),2)
+  if (length(pvals) == 1){
+    names(pvals) <- rownames(matrixList[[i]])
+  }
+  sortedExpMatrix <- matrixList[[i]][names(sort(pvals)), ,drop=FALSE]
+
+
+  SortedMatrixList[j] <- sortedExpMatrix
+  ##names(SortedMatrixList)[j] <- rownames(enhancer)[k]
+  j <- j + 1
+
+}
+
+
+save("SortedMatrixList", "fitList", file = "DEstats.Rda" )
