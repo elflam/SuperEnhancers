@@ -1,0 +1,65 @@
+### some input from DEstats ###
+### need Enhancer info from each matrix for label, DEMatrix, ClassVec, noodleOverlap, hotspot, fit2 ###
+
+for (i in SortedMatrixList){
+  k <- i
+  pdf(paste("enhancer", k, ".pdf", sep=""))
+  
+  #create label for pdf 
+  label <- paste(as.character(sortedEnhancer[i,]$chr), ":", sortedEnhancer[i,]$start, "-", sortedEnhancer[i,]$end)
+  textplot(label)
+  
+  #Create color vector for classVec
+  classCols <- classVec
+  classCols[colnames(NUsamp)] <- "blue"
+  classCols[colnames(NMsamp)] <- "cyan"
+  classCols[colnames(TUsamp)] <- "darkorchid"
+  classCols[colnames(TMsamp)] <- "darkolivegreen1"
+  classCols[colnames(XUsamp)] <- "aquamarine"
+  classCols[colnames(XMsamp)] <- "coral"
+  classCols[colnames(CUsamp)] <- "blanchedalmond"
+  classCols[colnames(CMsamp)] <- "cornflowerblue"
+  
+  classVec <- factor(classVec, levels=c('NU','NM','TU','TM','XU','XM','CU','CM'))
+  
+  #create plot with both normal & tumor meth ratios (hotspot)
+  Coordinate <- cbind(noodleOverlap$start, noodleOverlap$start)
+  Methylation <- cbind(noodleOverlap$nor.ratio, noodleOverlap$tmr.ratio)
+  par(mar=c(5.1, 4.1, 4.1, 8.1), xpd = TRUE)
+  matplot(Coordinate,Methylation, type="l", ylim=c(0,1))
+  points(c(noodleOverlap[hotspot, ]$start), rep(1, length(hotspot)), col = "blue", pch = 8)
+  legend('topright', inset=c(-0.25,0), pch='-',col=c('red','black'),legend=c('T','N'))
+  
+  #create heatmap
+  heatmap.2(sortedExpMatrix, Colv=F, Rowv=F, trace="none", scale='row',
+            col=redgreen, ColSideColors = classCols,
+            hclust=function(x) hclust(x,method="complete"),
+            distfun=function(x) as.dist((1-cor(t(x)))/2))
+  
+  #create waterfall plots
+  for (i in 1){
+    samples <- names(classVec)[order(classVec, sortedExpMatrix[i,])]
+    x = as.numeric(sortedExpMatrix[i, samples])
+    names(x) <- samples
+    par(mar=c(5.1, 4.1, 4.1, 8.1), xpd = TRUE)
+    barplot(x, las=2, col = classCols[samples])
+    legend(x="topright", inset=c(-0.25,0), legend = unique(classVec[order(classVec)]),
+           fill = unique(classCols[samples]), title = rownames(sortedExpMatrix)[i])
+  }
+  
+  #create table with genes, distance to enhancer, location, p-value, tstat
+  DE <- row.names(DEMatrix)
+  names(DE) <- row.names(DEMatrix)
+  DE[] <- c("no")
+  DE[DEgenes] <- "yes"
+  geneTable <- data.frame(position = positions2, distance=distance,
+                          LFC=round(DEMatrix.fit[rownames(DEMatrix),]$coefficients[,2],2),
+                          p.value = signif(fit2[rownames(DEMatrix),]$p.value[,2],2), 
+                          adj.p.value =signif(p.adjust(fit2[rownames(DEMatrix),]$p.value[,2],
+                          method='BH'),4), tstat = signif(fit2[rownames(DEMatrix),]$t[,2],2), DE = DE)
+  geneTable <- geneTable[order(geneTable$p.value),]
+  textplot(geneTable)
+  
+  
+  dev.off()
+  
