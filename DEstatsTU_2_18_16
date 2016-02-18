@@ -1,0 +1,106 @@
+
+#required packages
+library("edgeR")
+library(limma)
+library('ClassDiscovery')
+library('simpleaffy')
+
+### code
+setwd("C:/Users/eflam1/Desktop/Super-Enhancers/Code Skeleton")
+load("DefineSamplesTU.Rda")
+
+
+#import RNA expression (log)
+#prepare RNAExp for analysis  
+RNAExp <- read.table("Enhancer Data/HPVOPRSEMData_091615_log.csv", header = T, sep=",", quote="",
+                     na.strings="", comment.char="", stringsAsFactors=F)
+geneNames <- sapply(strsplit(RNAExp$genes, split="\\|"), function(x){x[[1]]})
+rownames(RNAExp) <- geneNames
+RNAExp2 <- RNAExp[,-1]
+
+j <- 1
+
+#initialize orderOutput
+orderVec <- vector()
+  
+#Create DGElist with all genes
+DEMatrix_DGE <- DGEList(counts=RNAExp2)#[ ,grep("T|N",colnames(RNAExp2))]) # move outside of loop and precompute (still filter to overall logFC and max expression >0)
+DEMatrix_DGE <- calcNormFactors(DEMatrix_DGE) # move outside of loop
+
+
+for (i in 1:length(enhancerList)){
+
+  #continue differential methylation
+  pheno <- factor(enhancerList[[i]][[2]][colnames(enhancerList[[i]][[1]])])
+  mm <- model.matrix(~pheno)
+  colnames(mm) <- levels(pheno)
+
+  DEMatrix_VOOM <- voom(DEMatrix_DGE, mm)
+  fit <- lmFit(DEMatrix_VOOM,mm)
+  DEMatrix.fit <- eBayes(fit) 
+  
+  #if ("NU" %in% levels(pheno) & "TU" %in% levels(pheno)){
+   # contrast.matrix = makeContrasts(contrasts=c("(NM + NU) - (TM + TU)"), levels=pheno)
+  #}else if (!("NU" %in% levels(pheno)) & "TU" %in% levels(pheno)){
+   # contrast.matrix = makeContrasts(contrasts=c("NM - (TM + TU)"), levels=pheno)
+  #}else if ("NU" %in% levels(pheno) & !("TU" %in% levels(pheno))){
+   # contrast.matrix = makeContrasts(contrasts=c("(NM + NU) - TM"), levels=pheno)
+  #}else if (!("NU" %in% levels(pheno)) & !("TU" %in% levels(pheno))){
+   # contrast.matrix = makeContrasts(contrasts=c("NM - TM"), levels=pheno)
+  #}
+    
+  if ("NU" %in% levels(pheno)){
+  contrast.matrix = makeContrasts(contrasts=c("(NM + NU) - TU"), levels=pheno)
+  }else{
+    contrast.matrix = makeContrasts(contrasts=c("NM - TU"), levels=pheno)
+  }
+  
+  fit2= contrasts.fit(DEMatrix.fit, contrast.matrix) 
+  fit2= eBayes(fit2) 
+
+  DEgenes <- row.names(topTable(fit2[rownames(enhancerList[[i]][[1]]),],p.value = 0.05, number=Inf,lfc=1))
+
+  #sort matrices by p-value
+  #pvals <- signif(p.adjust(fit2[rownames(enhancerList[[i]][[1]]),]$p.value[,2], method='BH'),2)
+  #change [,2] to [,1]
+  #pvals <- signif(p.adjust(fit2[rownames(enhancerList[[i]][[1]]),]$p.value[,1], method='BH'),2)
+  #if (length(pvals) == 1){
+    #names(pvals) <- rownames(enhancerList[[i]][[1]])
+  #}
+  #enhancerList[[i]][[1]] <- enhancerList[[i]][[1]][names(sort(pvals)), ,drop=FALSE]
+  
+  #prevent 1-row matrices
+  if (nrow(enhancerList[[i]][[1]]) == 1){
+    name <- rownames(enhancerList[[i]][[1]])
+    enhancerList[[i]][[1]] <- rbind(enhancerList[[i]][[1]][1,], enhancerList[[i]][[1]][1,], enhancerList[[i]][[1]][1,])
+    rownames(enhancerList[[i]][[1]]) <- c(name, name, name)
+    #enhancerList[[i]][[8]][2:3] <- c(enhancerList[[i]][[8]][1],enhancerList[[i]][[8]][1])
+    #names(enhancerList[[i]][[8]][3]) <- names(enhancerList[[i]][[8]][1])
+  }
+  
+  #create table with genes, distance to enhancer, location, p-value, tstat
+  DE <- row.names(enhancerList[[i]][[1]])
+  names(DE) <- row.names(enhancerList[[i]][[1]])
+  DE[] <- c("no")
+  DE[DEgenes] <- "yes"
+  
+   geneTable <- data.frame(position=enhancerList[[i]][[8]], distance=enhancerList[[i]][[9]],
+                          LFC=round(fit2[rownames(enhancerList[[i]][[1]]),]$coefficients[,1],2),
+                          p.value = signif(fit2[rownames(enhancerList[[i]][[1]]),]$p.value[,1],2), 
+                          adj.p.value =signif(p.adjust(fit2[rownames(enhancerList[[i]][[1]]),]$p.value[,1],
+                          method='BH'),4), tstat = signif(fit2[rownames(enhancerList[[i]][[1]]),]$t[,1],2), 
+                          DE = DE)
+   geneTable <-  geneTable[order(geneTable$p.value),])
+  
+  #add fit2 and DEgenes to enhancer enhancerList list
+  enhancerList[[i]][[11]] <- fit2
+  enhancerList[[i]][[12]] <- geneTable
+
+  orderVec[j] <- geneTable[1,5]
+    
+  j <- j+1
+}
+
+enhancerList <- enhancerList[order(orderVec)]
+
+save("enhancerList", file = "DEstatsTU.Rda" )
