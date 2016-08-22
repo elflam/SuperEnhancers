@@ -1,0 +1,128 @@
+
+#required packages
+library("edgeR")
+library(limma)
+#library('ClassDiscovery')
+library('simpleaffy')
+
+### code
+setwd("~/Desktop/Super-Enhancers/TCGA Validation")
+load("LocalMethTCGA.Rda")
+
+setwd("~/Desktop/Super-Enhancers/Code Skeleton")
+noodleLabels <- read.table("Noodles/noodleLabels.csv", header = F,sep=",",
+                           quote="", na.strings="", comment.char="", stringsAsFactors=F,
+                           nrows=1,row.names=1)
+j <- 1
+
+#initialize orderOutput
+orderVec <- vector()
+
+#Create DGElist with all genes
+DEMatrix_DGE <- DGEList(counts=RNAExp)#[ ,grep("T|N",colnames(RNAExp2))]) # move outside of loop and precompute (still filter to overall logFC and max expression >0)
+DEMatrix_DGE <- calcNormFactors(DEMatrix_DGE) # move outside of loop
+
+
+for (i in 1:length(enhancerList)){
+  
+  if (length(enhancerList[[i]][[15]]) == 0){
+    enhancerList[[i]][[19]] <- enhancerList[[i]][[13]]
+  }
+  
+  k<-i
+  
+  #continue differential methylation
+  pheno <- factor(enhancerList[[i]][[2]][colnames(enhancerList[[i]][[16]])])
+  mm <- model.matrix(~pheno)
+  colnames(mm) <- levels(pheno)
+  
+  DEMatrix_VOOM <- voom(DEMatrix_DGE, mm)
+  fit <- lmFit(DEMatrix_VOOM,mm)
+  DEMatrix.fit <- eBayes(fit) 
+  
+  if ("NU" %in% levels(pheno) & "NM" %in% levels(pheno) & "TU" %in% levels(pheno)){
+    contrast.matrix = makeContrasts(contrasts=c("(NM + NU) - (TM + TU)"), levels=pheno)
+  }else if (!("NU" %in% levels(pheno)) & "NM" %in% levels(pheno) & "TU" %in% levels(pheno)){
+    contrast.matrix = makeContrasts(contrasts=c("NM - (TM + TU)"), levels=pheno)
+  }else if ("NU" %in% levels(pheno) & "NM" %in% levels(pheno) & !("TU" %in% levels(pheno))){
+    contrast.matrix = makeContrasts(contrasts=c("(NM + NU) - TM"), levels=pheno)
+  }else if (!("NU" %in% levels(pheno)) & !("TU" %in% levels(pheno))){
+    contrast.matrix = makeContrasts(contrasts=c("NM - TM"), levels=pheno)
+  }else if (!("NM" %in% levels(pheno)) & "TU" %in% levels(pheno)){
+    contrast.matrix = makeContrasts(contrasts=c("NU - (TM+TU)"), levels=pheno)
+  }else if (!("NM" %in% levels(pheno)) & !("TU" %in% levels(pheno))){
+    contrast.matrix = makeContrasts(contrasts=c("NU - TM"), levels=pheno)
+  }
+  
+  fit2= contrasts.fit(DEMatrix.fit, contrast.matrix) 
+  fit2= eBayes(fit2) 
+  
+  DEgenes <- row.names(topTable(fit2[enhancerList[[i]][[15]],],p.value = 0.05, number=Inf,lfc=1))
+  
+  
+  #prevent 1-row matrices
+  if (nrow(enhancerList[[i]][[16]]) == 1){
+    name <- rownames(enhancerList[[i]][[16]])
+    enhancerList[[i]][[16]] <- rbind(enhancerList[[i]][[16]][1,], enhancerList[[i]][[16]][1,], enhancerList[[i]][[16]][1,])
+    rownames(enhancerList[[i]][[16]]) <- c(name, paste(name, "*" ), paste(name,"**"))
+    enhancerList[[i]][[17]][2:3] <- c(enhancerList[[i]][[17]][1],enhancerList[[i]][[17]][1])
+    enhancerList[[i]][[18]][2:3] <- c(enhancerList[[i]][[18]][1],enhancerList[[i]][[18]][1])
+    
+    #vector with DE determination
+    DE <- row.names(enhancerList[[i]][[16]])
+    names(DE) <- row.names(enhancerList[[i]][[16]])
+    DE[] <- c("no")
+    DE[DEgenes] <- "yes"
+    
+    #create table with genes, distance to enhancer, location, p-value, tstat
+    geneTable <- data.frame(position=enhancerList[[i]][[17]], distance=enhancerList[[i]][[18]],
+                            LFC=rep(round(fit2[name,]$coefficients[,1],2),3),
+                            p.value = rep(signif(fit2[name,]$p.value[,1],2),3), 
+                            adj.p.value = rep(signif(p.adjust(fit2[name,]$p.value[,1],
+                                                              method='BH'),4),3), tstat = rep(signif(fit2[name,]$t[,1],2),3), 
+                            DE = DE)
+  }else{
+    
+    #vector with DE determination
+    DE <- rownames(enhancerList[[i]][[16]])
+    names(DE) <- rownames(enhancerList[[i]][[16]])
+    DE[] <- c("no")
+    DE[DEgenes] <- "yes"
+    
+    #create table with genes, distance to enhancer, location, p-value, tstat
+    geneTable <- data.frame(position=enhancerList[[i]][[17]], distance=enhancerList[[i]][[18]],
+                            LFC=round(fit2[rownames(enhancerList[[i]][[16]]),]$coefficients[,1],2),
+                            p.value = signif(fit2[rownames(enhancerList[[i]][[16]]),]$p.value[,1],2), 
+                            adj.p.value =signif(p.adjust(fit2[rownames(enhancerList[[i]][[16]]),]$p.value[,1],
+                                                         method='BH'),4), tstat = signif(fit2[rownames(enhancerList[[i]][[16]]),]$t[,1],2), 
+                            DE = DE)
+  }
+  
+  geneTable <- geneTable[order(geneTable$p.value),]
+  
+  #sort ExpMatrix to match geneTable order
+  enhancerList[[i]][[16]] <- enhancerList[[i]][[16]][rownames(geneTable),]
+  
+  #add fit2 and DEgenes to enhancer enhancerList list
+  enhancerList[[i]][[19]] <- fit2
+  enhancerList[[i]][[21]] <- geneTable
+  
+  
+  if (nrow(geneTable) < 5){
+    ap <- nrow(geneTable)
+  }else{
+    ap <- 5
+  }
+  
+  pmean <- mean(geneTable$p.value[1:ap])  
+  orderVec[j] <- pmean
+  names(orderVec)[j] <- rownames(sortedEnhancer)[k]
+  
+  j <- j+1
+}
+
+enhancerList <- enhancerList[order(orderVec)]
+sortedEnhancer <- sortedEnhancer[names(orderVec[order(orderVec)]),]
+
+setwd("~/Desktop/Super-Enhancers/TCGA Validation")
+save("enhancerList","sortedEnhancer", file = "2DEstatsTCGA.Rda" )
