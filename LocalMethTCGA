@@ -1,0 +1,201 @@
+# i -> digits; items in enhancerList
+# a -> character; genes/rownames of enhancerList[[i]][[1]]
+# q -> digits; fill unmethSampsD (manually increase)
+#       reset and use to fill newMeth (manually increase)
+# m -> digits; fill avgVec, LM, and LM2 (manually increase)
+# n -> digits; loop through columns of Poodles to fill meth
+# z -> sample #s; loops through members of unmethSampsD2, used to calculate avg for and name newMeth items
+
+
+
+setwd("~/Desktop/Super-Enhancers/Code Skeleton")
+load("DEstatsTCGA.Rda")
+
+#load necessary chromosomes
+for (i in c(2,6,16,17)) {
+  load(paste("Noodles/chr",i,sep=""))
+}
+
+noodleLabels <- read.table("Noodles/noodleLabels.csv", header = F,sep=",",
+                           quote="", na.strings="", comment.char="", stringsAsFactors=F,
+                           nrows=1,row.names=1)
+
+#Rename RNA file to match previously written code 
+RNAExp <- RNAExp3
+
+#import clinical data (of questionable necessity...)
+clinical <- read.table("Enhancer Data/clinicaldata.csv", header = T,
+                       sep=",", quote="", na.strings="", comment.char="", stringsAsFactors=F)
+
+
+#Begin main Loop 
+for (i in 1:length(enhancerList)){
+  
+  #Call correct noodle file for chromosome  
+  m <- 1
+  CHR<-get(as.character(enhancerList[[i]][[3]]))
+  colnames(CHR) <- noodleLabels
+  
+  #initialize vector for collection of p.vals local promoter meth vs gene exp and average meth for promoter 
+  LM<-numeric()
+  LM2 <- numeric()
+  avgMeth <- numeric()
+  
+  for (a in rownames(enhancerList[[i]][[1]])){
+    
+    #Create Exp vector for gene
+    Exp <- as.numeric(RNAExp[which(rownames(RNAExp) == a),])
+    names(Exp) <- colnames(RNAExp)
+    Exp <- Exp[sort(names(Exp))]
+    
+    #get promoter region using positions vector from DefineSamples
+    TSS <- enhancerList[[i]][[9]][a] 
+    promoterStart <- TSS-1500
+    promoterEnd <- TSS + 500
+    
+    #noodles that span the promoter region
+    Poodles <- CHR[which(CHR$end >= promoterStart & CHR$start <= promoterEnd), 22:96] 
+    
+    #gather methylation data that overlaps promoter
+    #skip enhancers that have no methylation data
+    PoodleProbes <- methData[which(paste("chr",as.character(methData[,1]), sep='') == enhancerList[[i]][[3]] & 
+                  enhancerList[[i]][[5]] >= methData[,2] & enhancerList[[i]][[4]] <= methData[,2]), ,drop=FALSE]
+    
+    if (nrow(PoodleProbes) == 0){
+      LM[m] <- "NA P"
+      LM2[m] <- "NA P"
+      m <- m + 1 
+      next
+    }
+    
+    #Remove chr and coord columns from PoodleProbes
+    PoodleProbes <- PoodleProbes[,3:ncol(PoodleProbes),drop=FALSE]
+    
+    #Get binary of all noodles per sample
+    #Create subset of meth vector for only unmeth samples (based on average of noodles) for later Wilcoxon test
+    meth <- numeric()
+    methBinary <- numeric()
+    unmethSampsD <- character()
+    q<-1
+    
+    for(n in 1:ncol(PoodleProbes)){
+      avg <- mean(PoodleProbes[,n], na.rm = TRUE)
+      meth[n] <- avg
+      if (avg > 0.2){
+      methBinary[n] <- 1
+      }else{ 
+      methBinary[n]<-0
+      unmethSampsD[q] <- colnames(PoodleProbes)[n]
+      q <- q + 1
+      }
+    names(meth)[n] <- colnames(PoodleProbes)[n]
+    names(methBinary)[n] <- colnames(PoodleProbes)[n]
+    }
+    
+    #subset and order meth vector
+    meth <- meth[colnames(RNAExp)]
+    methBinary <- methBinary[colnames(RNAExp)]
+    
+    #add avg promoter meth (for all samples) to avgMeth
+    avgMeth[m] <- mean(meth)
+    names(avgMeth)[m] <- a
+    
+    #factor meth vector
+    methBinary <- factor(methBinary, levels=c(0,1))
+    
+    #report wilcox val to LM vector (NAs if < 2 levels)
+    if (length(which(methBinary == 0))==length(methBinary)){
+      LM[m]<- "NA 0"
+      names(LM)[m] <- a
+    }else if (length(which(methBinary == 1)) == length(methBinary)){
+      LM[m]<- "NA 1"
+      names(LM)[m] <- a
+    }else{
+      wilcox <- wilcox.test(Exp ~ methBinary)
+      LM[m] <- wilcox$p.value
+      names(LM)[m] <- a
+    }
+    
+    ###2nd Wilcoxon test with unmeth samples (exp vs. enhancer meth)
+    
+    #in the case of no unmethylated samples:
+    if (length(unmethSampsD) == 0){
+      LM2[m] <- "NA X"
+      m <- m + 1
+      next 
+    }
+    
+    #Exp vector for only unmeth samples
+    newExp <- Exp[sort(unmethSampsD)]
+    
+    #Create new meth vector of average methylation of Enhancer 
+    #(average of all noodles spanning enhancer) for each sample
+    q <- 1
+    newMeth <- numeric()
+    
+    #for (z in unmethSampsD){
+      #avg <- round(mean(enhancerList[[i]][[7]][enhancerList[[i]][[6]],z]))
+      #newMeth[q] <- avg
+      #names(newMeth)[q] <- z
+      #q <- q+1
+    #}
+    
+    for(z in unmethSampsD){
+      avg <- mean(enhancerList[[i]][[7]][enhancerList[[i]][[6]],which(colnames(enhancerList[[i]][[7]]) == z)],na.rm = TRUE)
+      if (avg > 0.2){
+        newMeth[q] <- 1
+      }else{ 
+        newMeth[q]<-0
+      }
+      names(newMeth)[q] <- z
+      q <- q + 1
+    }
+    
+    #sort newMeth
+    newMeth <- newMeth[sort(names(newMeth))]
+    
+    #report 2nd wilcox val to LM2 vector (NAs if < 2 levels)
+    if (length(which(newMeth == 0))==length(newMeth)){
+      LM2[m]<- "NA 0"
+      names(LM2)[m] <- a
+    }else if (length(which(newMeth == 1)) == length(newMeth)){
+      LM2[m]<- "NA 1"
+      names(LM2)[m] <- a
+    }else{
+      wilcox2 <- wilcox.test(newExp ~ newMeth)
+      LM2[m] <- wilcox2$p.value
+      names(LM2)[m] <- a
+    }
+    
+    if (enhancerList[[i]][[20]] == "X"){
+      break
+    }
+    m <- m + 1
+  } 
+  
+  ###### Create table for local meth info
+  LMtable <- data.frame(AvgProMethylation = avgMeth, Pp.value = LM, Ep.value = LM2)
+  
+  #Create list of genes that do not include NA 1 for first wilcoxon test
+  wilcoxGenes <- names(LM)[which(!(LM == "NA 1"))]
+  
+  
+  #add LMtable and wilcoxGenes to enhancerList
+  enhancerList[[i]][[14]] <- LMtable
+  enhancerList[[i]][[15]] <- wilcoxGenes
+  
+  wilcoxOverlap <- intersect(rownames(enhancerList[[i]][[1]]), wilcoxGenes)
+  
+  if(length(wilcoxOverlap)== 0){
+    enhancerList[[i]][[16]] <- enhancerList[[i]][[1]]
+    enhancerList[[i]][[17]] <- enhancerList[[i]][[9]]
+    enhancerList[[i]][[18]] <- enhancerList[[i]][[10]]
+  }else{
+    enhancerList[[i]][[16]] <- enhancerList[[i]][[1]][wilcoxOverlap,drop=FALSE,]
+    enhancerList[[i]][[17]] <- enhancerList[[i]][[9]][wilcoxOverlap]
+    enhancerList[[i]][[18]] <- enhancerList[[i]][[10]][wilcoxOverlap]
+  }
+  
+} 
+
+save("enhancerList","sortedEnhancer","RNAExp", "methData", file = "LocalMethTCGA.Rda" )
