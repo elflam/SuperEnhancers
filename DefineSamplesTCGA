@@ -1,0 +1,217 @@
+#### support functions 
+expmat <- function(x, y){
+  df <- merge(x, y, by= "row.names", all.x= F, all.y= F, sort=F)
+  rownames(df) <- df$Row.names
+  df$Row.names <- NULL
+  return(df)
+  }
+
+### code
+setwd("~/Desktop/Super-Enhancers/TCGA Validation")
+
+#import enhancer list and noodle docs, label columns of noodle docs
+enhancer <- read.csv("2016_7_12_SuperDuperEnhancersForTCGAvalidation.csv")
+for (i in 1:nrow(enhancer)){
+  rownames(enhancer)[i] <- paste(as.character(enhancer[i,]$chr), ":", enhancer[i,]$start, "-", enhancer[i,]$end, sep="")
+}
+
+setwd("~/Desktop/Super-Enhancers/Code Skeleton")
+#import enhancer list and noodle docs, label columns of noodle docs
+for (i in c(2,6,16,17)) {
+  load(paste("Noodles/chr",i,sep=""))
+}
+
+noodleLabels <- read.table("Noodles/noodleLabels.csv", header = F,sep=",",
+                           quote="", na.strings="", comment.char="", stringsAsFactors=F,
+                           nrows=1,row.names=1)
+
+#import methylation data
+load("~/Dropbox/HNSCC_data_for_Emily/HNSC_methData.rda")
+
+#import clinical data and RNA expression (log)
+load("~/Dropbox/HNSCC_data_for_Emily/HNSC_RNAseqNormV2.rda")
+RNAExp <- HNSC_RNAseqNormV2
+
+#create RNA expression matrix with just samples with meth data
+colnameOverlap <- colnames(RNAExp)[which(colnames(RNAExp) %in% colnames(HNSC_methData))]
+RNAExp2 <- RNAExp[ ,colnameOverlap]
+
+clinical <- read.table("Enhancer Data/clinicaldata.csv", header = T,
+                       sep=",", quote="", na.strings="", comment.char="", stringsAsFactors=F)
+
+#import phenotype for TCGA samples 
+pheno <- read.csv("~/Desktop/Super-Enhancers/TCGA validation/TCGA_pheno.csv", header = TRUE)
+
+#Find common samples in meth, RNA, and pheno data
+totalSamp <- intersect(colnames(HNSC_methData), colnames(RNAExp2))
+totalSamp2 <- intersect(totalSamp, pheno$phenoBarcode)
+
+#subset meth and RNA vectors to only have samples with all three data points (RNA, meth, pheno)
+RNAExp3 <- RNAExp2[,totalSamp2]
+methData <- HNSC_methData[,c(1,2,which(colnames(HNSC_methData) %in% totalSamp2))]
+
+j=1
+enhancerList <- list()
+
+#begin loop #1
+for (i in 1:nrow(enhancer)){
+  k <- i
+  
+  #filter out chrX
+  if (as.character(enhancer[i,]$chr) == "chrX"){
+    next
+  }
+  
+  #isolate chromosome number from enhancer dataframe
+  chr <- sapply(strsplit(as.character(enhancer[i,]$chr), "r"), function(x){x[[2]]})
+  
+  #gather methylation data that overlaps enhancers
+  #skip enhancers that have no methylation data
+  methOverlap <- methData[which(as.character(methData[,1]) == chr & 
+          enhancer[i,]$end >= methData[,2] & enhancer[i,]$start <= methData[,2]), ,drop=FALSE]
+  
+  if (nrow(methOverlap) == 0){
+    next
+  }
+  
+  
+  #find noodles overlapping with enhancer
+  CHR<-get(as.character(enhancer[i,]$chr))
+  colnames(CHR) <- noodleLabels
+  noodleOverlap <- CHR[which(CHR$end >= enhancer[i,]$start & CHR$start <= enhancer[i,]$end), ]   
+  
+  #find indices of hotspot (max nor.ratio) and determine which samples have 5 or fewer reads
+  hotspot <- which((abs(noodleOverlap$nor.ratio - noodleOverlap$tmr.ratio) == 
+                      max(abs(noodleOverlap$nor.ratio - noodleOverlap$tmr.ratio))) & 
+                     (abs(noodleOverlap$nor.ratio - noodleOverlap$tmr.ratio) > 0))
+  
+  #find coordinates of hotspot
+  hotspotStart <- noodleOverlap[hotspot[1],]$start
+  hotspotEnd <- noodleOverlap[hotspot[-1],]$end
+  
+  #find probes overlapping with hotspot
+  hotspotProbe <- which(methOverlap[,2] >= hotspotStart & methOverlap[,2] <= hotspotEnd)
+  
+  #find closest probe to hotspot if no probes directly overlap
+  if (length(hotspotProbe) == 0){
+    
+    #create vector of distances between each probe and hotspot (combine from start and end of hotspot)
+    fromHspot <- c(abs(methOverlap[,2] - hotspotStart),abs(methOverlap[,2] - hotspotEnd)) 
+    probe <- names(which(fromHspot == min(fromHspot)))
+    hotspotProbe <- which(rownames(methOverlap) == probe)
+  }
+  
+  #collect samples that are unmethylated at these hotspot probes 
+  if(length(hotspotProbe) > 1){
+    hotspotSamp <- names(which(apply(methOverlap[hotspotProbe,] <= 0.2,2,all)))
+  }else{
+    hotspotSamp <- names(which(methOverlap[hotspotProbe,] <= 0.2))
+  }
+  
+  #Expand enhancers by 1Mbp on each side
+  expStart <- enhancer[i,]$end - 1000000
+  expEnd <- enhancer[i,]$start + 1000000
+  
+  #find noodles overlapping extended enhancer & get list of closest genes
+  extendedOverlap <- CHR[which(CHR$end >= expStart & CHR$start <= expEnd), ]
+  geneList <- unique(extendedOverlap$closest.TSS)
+  positions <- unique(extendedOverlap$pos)
+  
+  #get expression data for closest genes from RNAExp file
+  #Genes that are not listed in RNAExp are filtered out
+  screenedGenes <- intersect(geneList, rownames(RNAExp2))
+  geneExp <- RNAExp2[screenedGenes, ]
+  
+  #Separate samples between normals and tumors, save vectors
+  normalSamps <- as.character(pheno[which(pheno$subsite == "N"),1])
+  tumorSamps <- as.character(pheno[which(pheno$subsite != "N"), 1])
+  
+  #filter out samples that aren't included in meth or RNA data
+  normalSamps2 <- normalSamps[which(normalSamps %in% totalSamp2)]
+  tumorSamps2 <- tumorSamps[which(tumorSamps %in% totalSamp2)]
+  
+  #separate normal and tumor samples (gene expression data)
+  Nsamp <- geneExp[ ,which(colnames(geneExp) %in% normalSamps2)]
+  Tsamp <- geneExp[ ,which(colnames(geneExp) %in% tumorSamps2)]
+  
+  
+  #Now that N and T samples are split, calculate avg meth for each probe for all samples, T samples and N samples
+  #set empty vectors
+  avgMethVec <- numeric()
+  TavgMethVec <- numeric()
+  NavgMethVec <- numeric()
+  #fill vectors and name items
+  for (d in 1:nrow(methOverlap)){
+    vecName <- rownames(methOverlap)[d]
+    avgMethVec[d] <- mean(methOverlap[d,3:27])
+    names(avgMethVec)[d] <- vecName
+    TavgMethVec[d] <- mean(methOverlap[d,tumorSamps2])
+    names(TavgMethVec)[d] <- vecName
+    NavgMethVec[d] <- mean(methOverlap[d,normalSamps2])
+    names(NavgMethVec)[d] <- vecName
+  }
+  
+  #create new Meth matrix with avg columns added
+  methOverlap2 <- cbind(methOverlap[,1:2,drop=FALSE], avgMethVec, TavgMethVec, NavgMethVec, methOverlap[,3:27,drop=FALSE])
+  methOverlap2 <- as.matrix(methOverlap2[order(methOverlap2[,2]),,drop=FALSE], drop=FALSE)
+  
+  #separate U & M samples, ensure that all are matrices 
+  NUsamp <- as.matrix(Nsamp[ ,which(colnames(Nsamp) %in% hotspotSamp), drop=FALSE])
+  NMsamp <- as.matrix(Nsamp[ ,which(!(colnames(Nsamp) %in% hotspotSamp)),drop=FALSE])
+  TUsamp <- as.matrix(Tsamp[ ,which(colnames(Tsamp) %in% hotspotSamp),drop=FALSE])
+  TMsamp <- as.matrix(Tsamp[ ,which(!(colnames(Tsamp) %in% hotspotSamp)), drop=FALSE])
+  
+  #create vector of samples with class type
+  classVec <- c(colnames(NUsamp), colnames(NMsamp), colnames(TUsamp), colnames(TMsamp))
+  names(classVec) <- classVec
+  classVec[colnames(NUsamp)] <- "NU"
+  classVec[colnames(NMsamp)] <- "NM"
+  classVec[colnames(TUsamp)] <- "TU"
+  classVec[colnames(TMsamp)] <- "TM"
+  
+  #Create color vector for classVec
+  classCols <- classVec
+  classCols[colnames(NUsamp)] <- "blue"
+  classCols[colnames(NMsamp)] <- "cyan"
+  classCols[colnames(TUsamp)] <- "darkorchid"
+  classCols[colnames(TMsamp)] <- "darkolivegreen1"
+  
+  classVec <- factor(classVec, levels=c('NU','NM','TU','TM'))
+  
+  #Create matrix  
+  DEMatrix <- Reduce(expmat, list(NUsamp, NMsamp, TUsamp, TMsamp))
+  DEMatrix <- as.matrix(DEMatrix[row.names(DEMatrix)%in%row.names(geneExp),])
+  
+  DEMatrix <- DEMatrix[apply(log2(DEMatrix+1),1,max) - apply(log2(DEMatrix+1),1,min)>0.5, ,drop=FALSE]
+  
+  #filter distances > 1Mbp
+  positions2 <- unique(extendedOverlap$pos[extendedOverlap$closest.TSS %in% row.names(DEMatrix)])
+  names(positions2) <- row.names(DEMatrix)
+  distance <- sapply(positions2, function(x) x-enhancer[i,]$start) 
+  names(distance) <- row.names(DEMatrix)
+  for (i in names(distance)){
+    if (distance[i] < -1000000){
+      DEMatrix <- DEMatrix[-(which(rownames(DEMatrix) == i)), ,drop=FALSE] 
+      positions2 <- positions2[-(which(names(positions2)==i))]
+      distance <- distance[-(which(names(distance)==i))]
+    }
+    else if (distance[i] > 1000000){
+      DEMatrix <- DEMatrix[-(which(rownames(DEMatrix) == i)), ,drop=FALSE]
+      positions2 <- positions2[-(which(names(positions2)==i))]
+      distance <- distance[-(which(names(distance)==i))]
+    }
+  }
+  
+  if (nrow(DEMatrix) == 0){
+    next
+  }
+  
+  # add necessary items to jth element of enhancerList and name for enhancer 
+  enhancerList[[j]] <- list(DEMatrix, classVec, as.character(enhancer[k,]$chr),
+                            enhancer[k,]$start, enhancer[k,]$end, hotspotProbe, methOverlap2, noodleOverlap, positions2, distance, classCols)  
+  j <- j + 1
+  
+}
+
+setwd("~/Desktop/Super-Enhancers/TCGA Validation")
+save("enhancerList","enhancer","RNAExp3","methData", file = "DefineSamplesTCGA.Rda")
