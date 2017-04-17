@@ -1,63 +1,58 @@
 setwd("~/Desktop/Super-Enhancers/TCGA Validation")
-load("2DEstatsTCGA.Rda")
+load("DEstatsTCGA2.Rda")
 
 library(gplots)
 
 for (i in 1:length(enhancerList)){
   k <- i
-  pdf(paste("TCGAsuperduperenhancer", k, ".pdf", sep=""))
+  pdf(file=paste0("TCGA", enhancerList[[i]][[3]],"_", enhancerList[[i]][[4]], "-", enhancerList[[i]][[5]]))
   
   #create label for pdf 
   label <- paste(enhancerList[[i]][[3]], ":", enhancerList[[i]][[4]], "-", enhancerList[[i]][[5]])
   textplot(label)
   
-  
   #create plot with both normal & tumor meth ratios (hotspot)
-  Coordinate <- cbind(enhancerList[[i]][[7]][,2], enhancerList[[i]][[7]][,2])
-  Methylation <- cbind(enhancerList[[i]][[7]][,5], enhancerList[[i]][[7]][,4])
+  Coordinate <- cbind(enhancerList[[i]][[6]][,2], enhancerList[[i]][[6]][,2])
+  Methylation <- cbind(enhancerList[[i]][[6]][,5], enhancerList[[i]][[6]][,4])
   par(mar=c(5.1, 4.1, 4.1, 8.1), xpd = TRUE)
   matplot(Coordinate,Methylation, type="l", ylim=c(0,1))
-  points(c(enhancerList[[i]][[8]][enhancerList[[i]][[6]], ]$start), rep(1, length(enhancerList[[i]][[6]])), col = "blue", pch = 8)
+  #points(c(enhancerList[[i]][[7]][enhancerList[[i]][[6]], ]$start), rep(1, length(enhancerList[[i]][[6]])), col = "blue", pch = 8)
   legend('topright', inset=c(-0.25,0), pch='-',col=c('red','black'),legend=c('T','N'))
+  
+  #manually input correct gene list
+  tmpgenes<-c("DPYSL3", "SPINK5", "JAKMIP2", "PPP2R2B", "SPINK7", "STK32A", "GPR151", "SPINK13", "SPINK9", "SCGB3A2", "C5orf46", "SPINK6", "SPINK1")
+  tmpgenes2 <- tmpgenes[which(tmpgenes %in% rownames(RNAExp3))]
+  tmpMatrix <- RNAExp3[tmpgenes2,colnames(enhancerList[[i]][[1]])]
   
   #modify for 1-row matrices
   if (enhancerList[[i]][[20]] == "X"){
     
-    heatmap.2(enhancerList[[i]][[1]], Colv=F, Rowv=F, trace="none", scale='row',
-              col=redgreen, ColSideColors = enhancerList[[i]][[11]],
-              hclust=function(x) hclust(x,method="complete"),
-              distfun=function(x) as.dist((1-cor(t(x)))/2))
+    heatmap.2(tmpMatrix, Colv=F, Rowv=F, trace="none", scale='row', col=redgreen, ColSideColors = enhancerList[[i]][[10]], hclust=function(x) hclust(x,method="complete"), distfun=function(x) as.dist((1-cor(t(x)))/2))
+    
   } else{
     #create heatmap
-    heatmap.2(enhancerList[[i]][[1]], Colv=F, Rowv=F, trace="none", scale='row',
-              col=redgreen, ColSideColors = enhancerList[[i]][[11]],
-              hclust=function(x) hclust(x,method="complete"),
-              distfun=function(x) as.dist((1-cor(t(x)))/2))
+    heatmap.2(tmpMatrix, Colv=F, Rowv=F, trace="none", scale='row',col=redgreen, ColSideColors = enhancerList[[i]][[10]], hclust=function(x) hclust(x,method="complete"), distfun=function(x) as.dist((1-cor(t(x)))/2))
   }
   
   #create waterfall plots
+  #if (nrow(enhancerList[[k]][[1]]) >= 5){
+    #wf <- 5
+  #}else{
+    #wf <- nrow(enhancerList[[k]][[1]])
+  #}
   
-  if (nrow(enhancerList[[k]][[21]]) >= 5){
-    wf <- 5
-  }else{
-    wf <- nrow(enhancerList[[k]][[21]])
-  }
-  
-  for (i in 1:wf){
-    samples <- names(enhancerList[[k]][[2]])[order(enhancerList[[k]][[2]],
-                                                   enhancerList[[k]][[16]][rownames(enhancerList[[k]][[21]][i,]),])]
-    x = as.numeric(enhancerList[[k]][[16]][rownames(enhancerList[[k]][[21]][i,]), samples])
-    names(x) <- samples
-    par(mar=c(5.1, 4.1, 4.1, 8.1), xpd = TRUE)
-    barplot(x, las=2, col = enhancerList[[k]][[11]][samples])
-    legend(x="topright", inset=c(-0.25,0), legend = unique(enhancerList[[k]][[2]][order(enhancerList[[k]][[2]])]),
-           fill = unique(enhancerList[[k]][[11]][samples]), title = rownames(enhancerList[[k]][[21]][i,]))
-  }
+  #for (i in 1:wf){
+    #samples <- names(enhancerList[[k]][[2]])[order(enhancerList[[k]][[2]], enhancerList[[k]][[1]][rownames(enhancerList[[k]][[12]][i,]),])]
+    #names(x) <- samples
+    #par(mar=c(5.1, 4.1, 4.1, 8.1), xpd = TRUE)
+    #barplot(x, las=2, col = enhancerList[[k]][[11]][samples])
+    #legend(x="topright", inset=c(-0.25,0), legend = unique(enhancerList[[k]][[2]][order(enhancerList[[k]][[2]])]), fill = unique(enhancerList[[k]][[11]][samples]), title = rownames(enhancerList[[k]][[1]][i,]))
+  #}
   
   #print gene table
   textplot(enhancerList[[k]][[13]])
-  textplot(enhancerList[[k]][[14]])
-  textplot(enhancerList[[k]][[21]])
+  #textplot(enhancerList[[k]][[14]])
+  #textplot(enhancerList[[k]][[21]])
   
   dev.off()
   
