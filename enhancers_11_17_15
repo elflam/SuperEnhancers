@@ -1,5 +1,7 @@
 setwd("~/Desktop/Super-Enhancers")
 
+print("hello")
+
 #import enhancer list and noodle docs, label columns of noodle docs
 enhancer<- read.csv("testEnhancer2.csv")
 for (i in 1:nrow(enhancer)){
